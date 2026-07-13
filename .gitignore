@@ -7,13 +7,17 @@ env/
 venv/
 ENV/
 .venv
+*.egg-info/
+dist/
+build/
 
 # 数据目录
-user_data/
-telegram_sessions/
+data/user_data/
+data/sessions/
 *.session
 *.session-journal
 logs/
+*.log
 
 # 环境变量
 .env
@@ -28,3 +32,4 @@ logs/
 # 测试
 .pytest_cache/
 .coverage
+htmlcov/
