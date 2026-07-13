@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 小鶴神 · 自动投注机器人 v3.0
-基于自投.py的登录逻辑重构
+GitHub 部署版 - 全自动下注 + 算法胜率排行榜
 """
 
 import asyncio
@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import sys
+import aiohttp
 from dataclasses import dataclass, field
 from datetime import datetime, date
 from enum import Enum
@@ -18,8 +19,6 @@ from typing import Optional, List, Dict, Any, Tuple
 from collections import Counter
 from pathlib import Path
 
-# ===== 修复：添加 aiohttp 导入 =====
-import aiohttp
 import requests
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
@@ -47,23 +46,23 @@ class Config:
             return
         self._initialized = True
         
-        # API 配置
-        self.API_ID = 2040
-        self.API_HASH = 'b18441a1ff607e10a989891a5462e627'
-        self.BOT_TOKEN = '8987076623:AAGYfKZMcv-ox10XVpYmpfoTPyoInQgWgLg'
-        self.OWNER_ID = 1047239922
+        # API 配置 - 从环境变量读取
+        self.API_ID = int(os.getenv('API_ID', 2040))
+        self.API_HASH = os.getenv('API_HASH', 'b18441a1ff607e10a989891a5462e627')
+        self.BOT_TOKEN = os.getenv('BOT_TOKEN', '8987076623:AAGYfKZMcv-ox10XVpYmpfoTPyoInQgWgLg')
+        self.OWNER_ID = int(os.getenv('OWNER_ID', 1047239922))
         
-        # 不使用代理
+        # 代理配置
         self.PROXY_LIST = []
         
         # 默认参数
-        self.DEFAULT_BASE_BET = 60000
-        self.DEFAULT_MARTIN_INCREMENT = 100000
-        self.DEFAULT_MAX_LOSSES = 10
-        self.DEFAULT_POLL_INTERVAL = 30
-        self.DEFAULT_BET_DELAY = 50
-        self.DEFAULT_TRIGGER_MULTIPLIER = 2.0
-        self.DEFAULT_SPECIAL_AMOUNT = 10000
+        self.DEFAULT_BASE_BET = int(os.getenv('DEFAULT_BASE_BET', 60000))
+        self.DEFAULT_MARTIN_INCREMENT = int(os.getenv('DEFAULT_MARTIN_INCREMENT', 100000))
+        self.DEFAULT_MAX_LOSSES = int(os.getenv('DEFAULT_MAX_LOSSES', 10))
+        self.DEFAULT_POLL_INTERVAL = int(os.getenv('DEFAULT_POLL_INTERVAL', 30))
+        self.DEFAULT_BET_DELAY = int(os.getenv('DEFAULT_BET_DELAY', 50))
+        self.DEFAULT_TRIGGER_MULTIPLIER = float(os.getenv('DEFAULT_TRIGGER_MULTIPLIER', 2.0))
+        self.DEFAULT_SPECIAL_AMOUNT = int(os.getenv('DEFAULT_SPECIAL_AMOUNT', 10000))
         
         # 赔率
         self.ODDS = {
@@ -74,8 +73,8 @@ class Config:
         }
         
         # 目录
-        self.DATA_DIR = "user_data"
-        self.SESSIONS_DIR = "telegram_sessions"
+        self.DATA_DIR = os.getenv('DATA_DIR', 'data/user_data')
+        self.SESSIONS_DIR = os.getenv('SESSIONS_DIR', 'data/sessions')
         self.WELCOME_IMAGE_URL = "https://free.boltp.com/2026/07/13/6a541b59a069a.webp"
         
         os.makedirs(self.DATA_DIR, exist_ok=True)
@@ -413,7 +412,6 @@ class UserState:
         if algo in self.algo_stats:
             if self.last_kill == actual:
                 self.algo_stats[algo]["win"] += 1
-            # 计算胜率
             stats = self.algo_stats[algo]
             if stats["total"] > 0:
                 stats["rate"] = round(stats["win"] / stats["total"] * 100, 2)
@@ -428,7 +426,6 @@ class UserState:
         profit = self.current_bet.calc_profit(draw)
         self.add_profit(profit)
         
-        # 记录预测结果
         self.record_result(draw.group.value)
         
         if profit > 0:
@@ -946,7 +943,6 @@ class XiaoHeShenBot:
             await self.send(update, "暂无数据，请先运行挂机", self.main_keyboard())
             return
         
-        # 按胜率排序
         sorted_algos = sorted(
             state.algo_stats.items(),
             key=lambda x: x[1].get("rate", 0),
@@ -1694,7 +1690,6 @@ class XiaoHeShenBot:
                 self._global_period = current.period
                 logger.info(f"新期号: {current.period} {current.nums}={current.sum}")
                 
-                # 获取所有活跃用户
                 states = []
                 for uid in list(self.store._cache.keys()):
                     state = await self.store.get(uid)
@@ -1719,18 +1714,15 @@ class XiaoHeShenBot:
                         if not state.groups:
                             continue
                         
-                        # 预测杀组
                         kill = predict_kill(history, state.algorithm)
                         
-                        # ===== 记录预测用于胜率统计 =====
+                        # 记录预测
                         state.record_prediction(state.algorithm, kill)
                         
-                        # 确定下注组（排除杀组）
                         bet_groups = [g for g in Group if g.value != kill]
                         
                         next_period = self.api.next_period(current.period)
                         
-                        # 13/14触发
                         triggered = False
                         if state.trigger_enabled and current.sum in (13, 14):
                             state.recommend_amount = int(state.recommend_amount * state.trigger_multiplier)
@@ -1745,7 +1737,6 @@ class XiaoHeShenBot:
                     except Exception as e:
                         logger.error(f"[{state.name}] 下注失败: {e}")
                 
-                # 汇总
                 total_bal = sum(s.balance for s in self.store._cache.values() if s.client)
                 total_profit = sum(s.daily_profit for s in self.store._cache.values() if s.client)
                 logger.info(f"汇总: 余额={total_bal:.3f} 盈亏={total_profit:+.3f}")
@@ -1786,7 +1777,7 @@ class XiaoHeShenBot:
         self.app.add_handler(CommandHandler("login", self.cmd_login))
         self.app.add_handler(CommandHandler("logout", self.cmd_logout))
         self.app.add_handler(CommandHandler("sessions", self.cmd_sessions))
-        self.app.add_handler(CommandHandler("rank", self.cmd_rank))  # 排行榜命令
+        self.app.add_handler(CommandHandler("rank", self.cmd_rank))
         self.app.add_handler(CommandHandler("add_group", self.cmd_add_group))
         self.app.add_handler(CommandHandler("default_group", self.cmd_default_group))
         self.app.add_handler(CommandHandler("list_groups", self.cmd_list_groups))
