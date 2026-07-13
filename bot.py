@@ -31,11 +31,11 @@ from python_socks import ProxyType
 class Config:
     """集中配置，便于修改与版本控制。"""
 
-    # ── Telegram ──
-    API_ID      = 38252668
-    API_HASH    = '7bfa9f824e18cd5498b984ee391de2e9'
-    BOT_TOKEN   = '8645128854:AAGb-B8S8hIoDf7kyMIZ20_ULYIzcefQkRc'
-    OWNER_ID    = 1047239922
+    # Telegram API 配置
+        API_ID = 2040
+        API_HASH = 'b18441a1ff607e10a989891a85d152c4'
+        BOT_TOKEN = '8987076623:AAGYfKZMcv-ox10XVpYmpfoTPyoInQgWgLg'
+        OWNER_ID = 1047239922
 
     # ── 代理 ──
     PROXIES = [
