@@ -45,8 +45,8 @@ class Config:
         self._initialized = True
         
         # API 配置
-        self.API_ID = 2040
-        self.API_HASH = 'b18441a1ff607e10a989891a85d152c4'
+        self.API_ID = 29653052
+        self.API_HASH = '6e0624a0f2b4828c98b3d555c67b7a8d'
         self.BOT_TOKEN = '8987076623:AAGYfKZMcv-ox10XVpYmpfoTPyoInQgWgLg'
         self.OWNER_ID = 1047239922
         
