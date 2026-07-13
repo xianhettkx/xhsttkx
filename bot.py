@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 小鶴神 · 自动投注机器人 v3.0
-GitHub 部署版 - 全自动下注 + 算法胜率排行榜
+GitHub Actions 部署版 - 完全硬编码，无需 Secrets
 """
 
 import asyncio
@@ -29,62 +29,35 @@ from telegram.ext import (
 )
 
 # ============================================================
-# 配置
+# 配置 - 直接硬编码，无需 Secrets
 # ============================================================
 
-class Config:
-    _instance = None
-    
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-    
-    def __init__(self):
-        if self._initialized:
-            return
-        self._initialized = True
-        
-        # API 配置 - 从环境变量读取
-        self.API_ID = int(os.getenv('API_ID', 2040))
-        self.API_HASH = os.getenv('API_HASH', 'b18441a1ff607e10a989891a5462e627')
-        self.BOT_TOKEN = os.getenv('BOT_TOKEN', '8987076623:AAGYfKZMcv-ox10XVpYmpfoTPyoInQgWgLg')
-        self.OWNER_ID = int(os.getenv('OWNER_ID', 1047239922))
-        
-        # 代理配置
-        self.PROXY_LIST = []
-        
-        # 默认参数
-        self.DEFAULT_BASE_BET = int(os.getenv('DEFAULT_BASE_BET', 60000))
-        self.DEFAULT_MARTIN_INCREMENT = int(os.getenv('DEFAULT_MARTIN_INCREMENT', 100000))
-        self.DEFAULT_MAX_LOSSES = int(os.getenv('DEFAULT_MAX_LOSSES', 10))
-        self.DEFAULT_POLL_INTERVAL = int(os.getenv('DEFAULT_POLL_INTERVAL', 30))
-        self.DEFAULT_BET_DELAY = int(os.getenv('DEFAULT_BET_DELAY', 50))
-        self.DEFAULT_TRIGGER_MULTIPLIER = float(os.getenv('DEFAULT_TRIGGER_MULTIPLIER', 2.0))
-        self.DEFAULT_SPECIAL_AMOUNT = int(os.getenv('DEFAULT_SPECIAL_AMOUNT', 10000))
-        
-        # 赔率
-        self.ODDS = {
-            'small_odd_big_even': 4.72,
-            'small_even_big_odd': 4.32,
-            'special_0_27': 4.72,
-            'special_baozi': 10.0,
-        }
-        
-        # 目录
-        self.DATA_DIR = os.getenv('DATA_DIR', 'data/user_data')
-        self.SESSIONS_DIR = os.getenv('SESSIONS_DIR', 'data/sessions')
-        self.WELCOME_IMAGE_URL = "https://free.boltp.com/2026/07/13/6a541b59a069a.webp"
-        
-        os.makedirs(self.DATA_DIR, exist_ok=True)
-        os.makedirs(self.SESSIONS_DIR, exist_ok=True)
-    
-    def get_session_path(self, phone: str) -> str:
-        safe_phone = phone.replace('+', 'plus').replace(' ', '')
-        return os.path.join(self.SESSIONS_DIR, f"{safe_phone}.session")
+API_ID = 2040
+API_HASH = 'b18441a1ff607e10a989891a5462e627'
+BOT_TOKEN = '8987076623:AAGYfKZMcv-ox10XVpYmpfoTPyoInQgWgLg'
+OWNER_ID = 1047239922
 
-config = Config()
+DATA_DIR = "data/user_data"
+SESSIONS_DIR = "data/sessions"
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(SESSIONS_DIR, exist_ok=True)
+
+# 默认参数
+DEFAULT_BASE_BET = 60000
+DEFAULT_MARTIN_INCREMENT = 100000
+DEFAULT_MAX_LOSSES = 10
+DEFAULT_POLL_INTERVAL = 30
+DEFAULT_BET_DELAY = 50
+DEFAULT_TRIGGER_MULTIPLIER = 2.0
+DEFAULT_SPECIAL_AMOUNT = 10000
+
+# 赔率
+ODDS = {
+    'small_odd_big_even': 4.72,
+    'small_even_big_odd': 4.32,
+    'special_0_27': 4.72,
+    'special_baozi': 10.0,
+}
 
 # ============================================================
 # 日志
@@ -280,32 +253,31 @@ class UserState:
         self.profit_target = 0.0
         self.loss_target = 0.0
         
-        self.base_bet = config.DEFAULT_BASE_BET
-        self.increment = config.DEFAULT_MARTIN_INCREMENT
-        self.max_losses = config.DEFAULT_MAX_LOSSES
-        self.bet_delay = config.DEFAULT_BET_DELAY
-        self.poll_interval = config.DEFAULT_POLL_INTERVAL
+        self.base_bet = DEFAULT_BASE_BET
+        self.increment = DEFAULT_MARTIN_INCREMENT
+        self.max_losses = DEFAULT_MAX_LOSSES
+        self.bet_delay = DEFAULT_BET_DELAY
+        self.poll_interval = DEFAULT_POLL_INTERVAL
         self.trigger_enabled = True
-        self.trigger_multiplier = config.DEFAULT_TRIGGER_MULTIPLIER
+        self.trigger_multiplier = DEFAULT_TRIGGER_MULTIPLIER
         
         self.special_0_enabled = True
-        self.special_0_amount = config.DEFAULT_SPECIAL_AMOUNT
+        self.special_0_amount = DEFAULT_SPECIAL_AMOUNT
         self.special_27_enabled = True
-        self.special_27_amount = config.DEFAULT_SPECIAL_AMOUNT
+        self.special_27_amount = DEFAULT_SPECIAL_AMOUNT
         self.special_baozi_enabled = True
-        self.special_baozi_amount = config.DEFAULT_SPECIAL_AMOUNT
+        self.special_baozi_amount = DEFAULT_SPECIAL_AMOUNT
         
         self.algorithm = "hybrid"
         self.betting = False
         self.losses = 0
-        self.recommend_amount = config.DEFAULT_BASE_BET
+        self.recommend_amount = DEFAULT_BASE_BET
         self.last_period = None
         self.history = []
         self.current_bet = None
         self.pending_login = None
         self.pending_action = None
         
-        # 算法胜率统计
         self.algo_stats = {}
         self.last_kill = None
         self.last_predicted_algo = None
@@ -359,15 +331,15 @@ class UserState:
     def special_items(self) -> List[BetItem]:
         items = []
         if self.special_0_enabled:
-            items.append(BetItem("0", self.special_0_amount, config.ODDS['special_0_27']))
+            items.append(BetItem("0", self.special_0_amount, ODDS['special_0_27']))
         if self.special_27_enabled:
-            items.append(BetItem("27", self.special_27_amount, config.ODDS['special_0_27']))
+            items.append(BetItem("27", self.special_27_amount, ODDS['special_0_27']))
         if self.special_baozi_enabled:
-            items.append(BetItem("豹子", self.special_baozi_amount, config.ODDS['special_baozi']))
+            items.append(BetItem("豹子", self.special_baozi_amount, ODDS['special_baozi']))
         return items
     
     def get_odds(self, g: Group) -> float:
-        return config.ODDS['small_odd_big_even'] if g in (Group.SMALL_ODD, Group.BIG_EVEN) else config.ODDS['small_even_big_odd']
+        return ODDS['small_odd_big_even'] if g in (Group.SMALL_ODD, Group.BIG_EVEN) else ODDS['small_even_big_odd']
     
     def reset_daily(self):
         today = date.today().isoformat()
@@ -384,7 +356,6 @@ class UserState:
         self.mark()
     
     def record_prediction(self, algo: str, kill: str):
-        """记录预测"""
         algo_names = {
             '5y': '悲天5Y', '7y': '悲天7Y',
             'hybrid': '悲天混合', 'stats': '统计规律',
@@ -404,7 +375,6 @@ class UserState:
         self.mark()
     
     def record_result(self, actual: str):
-        """记录预测结果"""
         if not self.last_kill or not self.last_predicted_algo:
             return
         
@@ -627,7 +597,6 @@ def predict_kill(history, algo):
 
 class APIClient:
     async def fetch(self, nbr=100) -> List[Draw]:
-        """获取历史开奖数据"""
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"https://pc28.help/api/kj.json?nbr={nbr}", timeout=15) as resp:
@@ -668,10 +637,10 @@ class APIClient:
 
 class LoginService:
     async def login(self, phone: str) -> Tuple[bool, str, Optional[TelegramClient]]:
-        session_path = config.get_session_path(phone)
+        session_path = os.path.join(SESSIONS_DIR, f"{phone.replace('+', '')}.session")
         
         try:
-            client = TelegramClient(session_path, config.API_ID, config.API_HASH)
+            client = TelegramClient(session_path, API_ID, API_HASH)
             await client.connect()
             
             if await client.is_user_authorized():
@@ -710,7 +679,7 @@ class LoginService:
 
 class XiaoHeShenBot:
     def __init__(self):
-        self.store = Store(config.DATA_DIR)
+        self.store = Store(DATA_DIR)
         self.api = APIClient()
         self.login = LoginService()
         self.app = None
@@ -930,13 +899,12 @@ class XiaoHeShenBot:
         await self.send(update, "已登出", self.main_keyboard())
     
     async def cmd_sessions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        files = [f for f in os.listdir(config.SESSIONS_DIR) if f.endswith('.session')]
+        files = [f for f in os.listdir(SESSIONS_DIR) if f.endswith('.session')]
         await self.send(update, f"会话: {', '.join(files) if files else '无'}", self.main_keyboard())
     
     # ---- 算法排行榜 ----
     
     async def cmd_rank(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """算法胜率排行榜"""
         state = await self.get_state(update.effective_chat.id)
         
         if not state.algo_stats:
@@ -1265,7 +1233,7 @@ class XiaoHeShenBot:
     # ---- 管理员 ----
     
     async def cmd_admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_chat.id != config.OWNER_ID:
+        if update.effective_chat.id != OWNER_ID:
             await self.send(update, "权限不足")
             return
         users = await self.store.list_all()
@@ -1285,7 +1253,7 @@ class XiaoHeShenBot:
         )
     
     async def cmd_admin_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_chat.id != config.OWNER_ID:
+        if update.effective_chat.id != OWNER_ID:
             await self.send(update, "权限不足")
             return
         if not context.args:
@@ -1716,7 +1684,6 @@ class XiaoHeShenBot:
                         
                         kill = predict_kill(history, state.algorithm)
                         
-                        # 记录预测
                         state.record_prediction(state.algorithm, kill)
                         
                         bet_groups = [g for g in Group if g.value != kill]
@@ -1758,12 +1725,12 @@ class XiaoHeShenBot:
             logger.info("aiohttp 已安装")
         
         try:
-            requests.get(f"https://api.telegram.org/bot{config.BOT_TOKEN}/deleteWebhook")
+            requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook")
             await asyncio.sleep(0.5)
         except:
             pass
         
-        self.app = Application.builder().token(config.BOT_TOKEN).build()
+        self.app = Application.builder().token(BOT_TOKEN).build()
         await self.app.bot.delete_webhook(drop_pending_updates=True)
         self.bot = self.app.bot
         
