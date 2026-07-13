@@ -18,6 +18,8 @@ from typing import Optional, List, Dict, Any, Tuple
 from collections import Counter
 from pathlib import Path
 
+# ===== 修复：添加 aiohttp 导入 =====
+import aiohttp
 import requests
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
@@ -45,7 +47,7 @@ class Config:
             return
         self._initialized = True
         
-        # API 配置 - 使用你的
+        # API 配置
         self.API_ID = 2040
         self.API_HASH = 'b18441a1ff607e10a989891a5462e627'
         self.BOT_TOKEN = '8987076623:AAGYfKZMcv-ox10XVpYmpfoTPyoInQgWgLg'
@@ -262,7 +264,7 @@ class UserState:
         self.phone = None
         self.tg_uid = None
         self.client = None
-        self.client_phone = None  # 用于存储手机号
+        self.client_phone = None
         
         self.groups = []
         self.multipliers = {}
@@ -294,7 +296,7 @@ class UserState:
         self.special_baozi_enabled = True
         self.special_baozi_amount = config.DEFAULT_SPECIAL_AMOUNT
         
-        self.algorithm = "hybrid"  # 默认混合
+        self.algorithm = "hybrid"
         self.betting = False
         self.losses = 0
         self.recommend_amount = config.DEFAULT_BASE_BET
@@ -303,6 +305,11 @@ class UserState:
         self.current_bet = None
         self.pending_login = None
         self.pending_action = None
+        
+        # 算法胜率统计
+        self.algo_stats = {}
+        self.last_kill = None
+        self.last_predicted_algo = None
     
     async def load(self):
         data = await self._store.load(self.uid)
@@ -313,6 +320,8 @@ class UserState:
                 self.history = [Draw.from_dict(d) for d in v]
             elif k == 'current_bet' and v:
                 self.current_bet = BetRecord.from_dict(v)
+            elif k == 'algo_stats':
+                self.algo_stats = v
             elif hasattr(self, k):
                 setattr(self, k, v)
         self._dirty = False
@@ -340,6 +349,7 @@ class UserState:
             'last_period': self.last_period,
             'history': [d.to_dict() for d in self.history[-200:]],
             'current_bet': self.current_bet.to_dict() if self.current_bet else None,
+            'algo_stats': self.algo_stats,
         }
         await self._store.save(self.uid, data)
         self._dirty = False
@@ -374,11 +384,53 @@ class UserState:
         self.last_balance = self.balance
         self.mark()
     
+    def record_prediction(self, algo: str, kill: str):
+        """记录预测"""
+        algo_names = {
+            '5y': '悲天5Y', '7y': '悲天7Y',
+            'hybrid': '悲天混合', 'stats': '统计规律',
+            'all': '全部融合', 'cit': 'CIT杀组'
+        }
+        
+        if algo not in self.algo_stats:
+            self.algo_stats[algo] = {
+                "win": 0,
+                "total": 0,
+                "name": algo_names.get(algo, algo)
+            }
+        
+        self.algo_stats[algo]["total"] += 1
+        self.last_kill = kill
+        self.last_predicted_algo = algo
+        self.mark()
+    
+    def record_result(self, actual: str):
+        """记录预测结果"""
+        if not self.last_kill or not self.last_predicted_algo:
+            return
+        
+        algo = self.last_predicted_algo
+        if algo in self.algo_stats:
+            if self.last_kill == actual:
+                self.algo_stats[algo]["win"] += 1
+            # 计算胜率
+            stats = self.algo_stats[algo]
+            if stats["total"] > 0:
+                stats["rate"] = round(stats["win"] / stats["total"] * 100, 2)
+            self.mark()
+        
+        self.last_kill = None
+        self.last_predicted_algo = None
+    
     async def settle(self, draw: Draw) -> float:
         if not self.current_bet:
             return 0.0
         profit = self.current_bet.calc_profit(draw)
         self.add_profit(profit)
+        
+        # 记录预测结果
+        self.record_result(draw.group.value)
+        
         if profit > 0:
             self.losses = 0
             self.recommend_amount = self.base_bet
@@ -426,7 +478,7 @@ class UserState:
         return True
 
 # ============================================================
-# 预测引擎 - 从自投.py移植
+# 预测引擎
 # ============================================================
 
 class BeitianPredictor:
@@ -563,7 +615,6 @@ def predict_kill(history, algo):
     elif algo == 'stats':
         return predict_stats(history)
     elif algo == 'all':
-        # 融合：多个算法投票
         bt = BeitianPredictor()
         bt.add_data(history)
         k5 = bt.predict_5y()
@@ -615,24 +666,21 @@ class APIClient:
         return period + '+1'
 
 # ============================================================
-# 登录服务 - 从自投.py移植
+# 登录服务
 # ============================================================
 
 class LoginService:
     async def login(self, phone: str) -> Tuple[bool, str, Optional[TelegramClient]]:
-        """登录 - 使用自投.py的逻辑"""
         session_path = config.get_session_path(phone)
         
         try:
             client = TelegramClient(session_path, config.API_ID, config.API_HASH)
             await client.connect()
             
-            # 检查是否已授权
             if await client.is_user_authorized():
                 me = await client.get_me()
                 return True, f"已登录: {me.first_name}", client
             
-            # 发送验证码
             await client.send_code_request(phone)
             return True, "验证码已发送", client
             
@@ -643,7 +691,6 @@ class LoginService:
             return False, f"连接失败: {str(e)[:50]}", None
     
     async def complete_login(self, client: TelegramClient, phone: str, code: str, password: str = None) -> Tuple[bool, str]:
-        """完成登录"""
         try:
             await client.sign_in(phone=phone, code=code)
             me = await client.get_me()
@@ -683,7 +730,8 @@ class XiaoHeShenBot:
             ["登录账号", "登出账号"],
             ["群组管理", "切换算法"],
             ["下注设置", "特殊项"],
-            ["13/14设置", "会话列表"]
+            ["13/14设置", "算法排行榜"],
+            ["会话列表"]
         ], resize_keyboard=True)
     
     def group_keyboard(self):
@@ -887,6 +935,42 @@ class XiaoHeShenBot:
     async def cmd_sessions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         files = [f for f in os.listdir(config.SESSIONS_DIR) if f.endswith('.session')]
         await self.send(update, f"会话: {', '.join(files) if files else '无'}", self.main_keyboard())
+    
+    # ---- 算法排行榜 ----
+    
+    async def cmd_rank(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """算法胜率排行榜"""
+        state = await self.get_state(update.effective_chat.id)
+        
+        if not state.algo_stats:
+            await self.send(update, "暂无数据，请先运行挂机", self.main_keyboard())
+            return
+        
+        # 按胜率排序
+        sorted_algos = sorted(
+            state.algo_stats.items(),
+            key=lambda x: x[1].get("rate", 0),
+            reverse=True
+        )
+        
+        lines = ["[算法胜率排行榜]"]
+        lines.append("━" * 25)
+        
+        for i, (algo, stats) in enumerate(sorted_algos, 1):
+            name = stats.get("name", algo)
+            rate = stats.get("rate", 0)
+            win = stats.get("win", 0)
+            total = stats.get("total", 0)
+            
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
+            lines.append(f"{medal} {name}")
+            lines.append(f"   胜率: {rate:.1f}% ({win}/{total})")
+        
+        lines.append("━" * 25)
+        total_predictions = sum(s.get("total", 0) for _, s in sorted_algos)
+        lines.append(f"📊 总预测次数: {total_predictions}")
+        
+        await self.send(update, "\n".join(lines), self.main_keyboard())
     
     # ---- 群组 ----
     
@@ -1254,6 +1338,7 @@ class XiaoHeShenBot:
             "登录账号": self.cmd_login,
             "登出账号": self.cmd_logout,
             "会话列表": self.cmd_sessions,
+            "算法排行榜": self.cmd_rank,
             "返回主菜单": self.cmd_start,
         }
         if text in cmd_map:
@@ -1369,7 +1454,6 @@ class XiaoHeShenBot:
             state.mark()
             await state.save()
             
-            # 发送验证码
             success, msg, client = await self.login.login(text)
             if not success:
                 await self.send(update, f"错误: {msg}")
@@ -1378,7 +1462,6 @@ class XiaoHeShenBot:
                 await state.save()
                 return
             
-            # 保存客户端
             state.pending_login['client'] = client
             state.mark()
             await state.save()
@@ -1639,7 +1722,10 @@ class XiaoHeShenBot:
                         # 预测杀组
                         kill = predict_kill(history, state.algorithm)
                         
-                        # 确定下注组
+                        # ===== 记录预测用于胜率统计 =====
+                        state.record_prediction(state.algorithm, kill)
+                        
+                        # 确定下注组（排除杀组）
                         bet_groups = [g for g in Group if g.value != kill]
                         
                         next_period = self.api.next_period(current.period)
@@ -1700,6 +1786,7 @@ class XiaoHeShenBot:
         self.app.add_handler(CommandHandler("login", self.cmd_login))
         self.app.add_handler(CommandHandler("logout", self.cmd_logout))
         self.app.add_handler(CommandHandler("sessions", self.cmd_sessions))
+        self.app.add_handler(CommandHandler("rank", self.cmd_rank))  # 排行榜命令
         self.app.add_handler(CommandHandler("add_group", self.cmd_add_group))
         self.app.add_handler(CommandHandler("default_group", self.cmd_default_group))
         self.app.add_handler(CommandHandler("list_groups", self.cmd_list_groups))
