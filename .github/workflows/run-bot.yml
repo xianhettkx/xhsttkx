@@ -1,18 +1,16 @@
-name: PC28 Bot 24/7
+name: 小鶴神 Bot 24/7
 
 on:
   push:
     branches: [ main ]
   schedule:
-    # 每 5 分钟触发一次，保持运行
-    - cron: '*/5 * * * *'
+    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    # 关键：设置超时时间，让 bot 一直运行
-    timeout-minutes: 350  # GitHub Actions 最大 360 分钟
+    timeout-minutes: 350
     
     steps:
     - uses: actions/checkout@v3
@@ -25,11 +23,11 @@ jobs:
     - name: 安装依赖
       run: |
         pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install aiohttp requests telethon python-telegram-bot python-socks
     
     - name: 创建目录
       run: |
-        mkdir -p user_data telegram_sessions
+        mkdir -p data/user_data data/sessions logs
     
     - name: 运行机器人
       env:
@@ -38,8 +36,9 @@ jobs:
         BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         OWNER_ID: ${{ secrets.OWNER_ID }}
       run: |
-        # 使用循环让 bot 持续运行
         while true; do
-          python bot.py || echo "Bot crashed, restarting..."
-          sleep 5
+          echo "🚀 启动小鶴神..."
+          python bot.py
+          echo "❌ 机器人崩溃，10秒后重启..."
+          sleep 10
         done
