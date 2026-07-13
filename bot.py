@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram 自动下注机器人 - 小鶴神 v3.0
-简约版 - 无 Emoji，紧凑信息
+小鶴神 · 自动投注机器人 v3.0
+基于自投.py的登录逻辑重构
 """
 
 import asyncio
@@ -16,10 +16,11 @@ from datetime import datetime, date
 from enum import Enum
 from typing import Optional, List, Dict, Any, Tuple
 from collections import Counter
+from pathlib import Path
 
 import requests
-from telethon import TelegramClient, errors
-from python_socks import ProxyType
+from telethon import TelegramClient
+from telethon.errors import SessionPasswordNeededError, FloodWaitError
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters,
@@ -44,9 +45,9 @@ class Config:
             return
         self._initialized = True
         
-        # API 配置
-        self.API_ID = 29653052
-        self.API_HASH = '6e0624a0f2b4828c98b3d555c67b7a8d'
+        # API 配置 - 使用你的
+        self.API_ID = 2040
+        self.API_HASH = 'b18441a1ff607e10a989891a5462e627'
         self.BOT_TOKEN = '8987076623:AAGYfKZMcv-ox10XVpYmpfoTPyoInQgWgLg'
         self.OWNER_ID = 1047239922
         
@@ -58,7 +59,7 @@ class Config:
         self.DEFAULT_MARTIN_INCREMENT = 100000
         self.DEFAULT_MAX_LOSSES = 10
         self.DEFAULT_POLL_INTERVAL = 30
-        self.DEFAULT_BET_DELAY = 15
+        self.DEFAULT_BET_DELAY = 50
         self.DEFAULT_TRIGGER_MULTIPLIER = 2.0
         self.DEFAULT_SPECIAL_AMOUNT = 10000
         
@@ -74,7 +75,6 @@ class Config:
         self.DATA_DIR = "user_data"
         self.SESSIONS_DIR = "telegram_sessions"
         self.WELCOME_IMAGE_URL = "https://free.boltp.com/2026/07/13/6a541b59a069a.webp"
-        self.BOT_NAME = "小鶴神"
         
         os.makedirs(self.DATA_DIR, exist_ok=True)
         os.makedirs(self.SESSIONS_DIR, exist_ok=True)
@@ -89,7 +89,10 @@ config = Config()
 # 日志
 # ============================================================
 
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] [%(levelname)s] %(message)s'
+)
 logger = logging.getLogger("XiaoHeShen")
 
 # ============================================================
@@ -130,10 +133,6 @@ class Draw:
     @property
     def group(self) -> Group:
         return Group.from_sum(self.sum)
-    
-    @property
-    def is_baozi(self) -> bool:
-        return self.hundreds == self.tens == self.ones
     
     @property
     def nums(self) -> str:
@@ -177,7 +176,7 @@ class BetRecord:
         if name == "27":
             return draw.sum == 27
         if name == "豹子":
-            return draw.is_baozi
+            return draw.hundreds == draw.tens == draw.ones
         return False
     
     def to_dict(self) -> Dict:
@@ -263,6 +262,7 @@ class UserState:
         self.phone = None
         self.tg_uid = None
         self.client = None
+        self.client_phone = None  # 用于存储手机号
         
         self.groups = []
         self.multipliers = {}
@@ -294,7 +294,7 @@ class UserState:
         self.special_baozi_enabled = True
         self.special_baozi_amount = config.DEFAULT_SPECIAL_AMOUNT
         
-        self.algorithm = "cit"
+        self.algorithm = "hybrid"  # 默认混合
         self.betting = False
         self.losses = 0
         self.recommend_amount = config.DEFAULT_BASE_BET
@@ -322,6 +322,7 @@ class UserState:
             return
         data = {
             'name': self.name, 'phone': self.phone, 'tg_uid': self.tg_uid,
+            'client_phone': self.client_phone,
             'groups': self.groups, 'multipliers': self.multipliers, 'default_group': self.default_group,
             'balance': self.balance, 'last_balance': self.last_balance,
             'usdt': self.usdt, 'cny': self.cny, 'kkcoin': self.kkcoin,
@@ -412,6 +413,10 @@ class UserState:
             try:
                 await self.client.send_message(gid, msg)
                 logger.info(f"[{self.name}] 下注到 {gid}: {msg[:80]}")
+            except FloodWaitError as e:
+                logger.warning(f"[{self.name}] Flood wait {e.seconds}s")
+                await asyncio.sleep(e.seconds)
+                return False
             except Exception as e:
                 logger.error(f"[{self.name}] 下注失败 {gid}: {e}")
                 return False
@@ -419,141 +424,188 @@ class UserState:
         self.mark()
         await self.save()
         return True
-    
-    async def update_balance(self):
-        if not self.client:
-            return
-        try:
-            await self.client.send_message('kkpay', '/start')
-            await asyncio.sleep(3)
-            msgs = await self.client.get_messages('kkpay', limit=5)
-            for msg in msgs:
-                if not msg.text:
-                    continue
-                usdt = self._parse_currency(msg.text, 'USDT')
-                cny = self._parse_currency(msg.text, 'CNY')
-                kkcoin = self._parse_currency(msg.text, 'KKCOIN')
-                if kkcoin is not None:
-                    self.usdt = usdt or 0.0
-                    self.cny = cny or 0.0
-                    self.kkcoin = kkcoin
-                    profit = kkcoin - self.last_balance
-                    self.balance = kkcoin
-                    self.last_balance = kkcoin
-                    self.reset_daily()
-                    self.daily_profit += profit
-                    self.mark()
-                    await self.save()
-                    logger.info(f"[{self.name}] 余额: KKCOIN={kkcoin:.3f} 盈亏={profit:+.3f}")
-                    break
-        except Exception as e:
-            logger.error(f"[{self.name}] 余额查询失败: {e}")
-    
-    @staticmethod
-    def _parse_currency(text: str, currency: str) -> Optional[float]:
-        m = re.search(rf'{currency}\s*[:：]\s*([\d.]+)', text, re.IGNORECASE)
-        return float(m.group(1)) if m else None
 
 # ============================================================
-# 预测引擎
+# 预测引擎 - 从自投.py移植
 # ============================================================
 
-class Predictor:
-    def predict(self, history: List[Draw], algo: str) -> Optional[str]:
-        if len(history) < 2:
-            return None
-        if algo == 'cit':
-            return self._cit(history)
-        return self._beitian(history)
-    
-    def _cit(self, history: List[Draw]) -> Optional[str]:
-        if len(history) < 5:
+class BeitianPredictor:
+    def __init__(self):
+        self.history = []
+        self.yu5_rules = {0: 'shi', 1: 'ge', 2: 'bai', 3: 'bai_shi', 4: 'ge'}
+        self.yu7_rules = {0: 'shi', 1: 'ge', 2: 'bai', 3: 'bai_shi', 4: 'ge', 5: 'shi', 6: 'bai'}
+        self.yu5_kill = {0: '小单', 1: '大单', 2: '小双', 3: '大双', 4: '小单'}
+        self.yu7_kill = {0: '小单', 1: '大单', 2: '小双', 3: '大双', 4: '小单', 5: '小双', 6: '小单'}
+
+    def add_data(self, history):
+        self.history = []
+        for item in history:
+            if isinstance(item, Draw):
+                total = item.sum
+                nums = [item.hundreds, item.tens, item.ones]
+            elif isinstance(item, dict):
+                total = item.get('sum', 0)
+                n = item.get('number', '0+0+0')
+                nums = [int(x) for x in n.split('+')] if '+' in n and len(n.split('+')) == 3 else [0, 0, 0]
+            else:
+                continue
+            self.history.append({'total': total, 'nums': nums, 'yu5': total % 5, 'yu7': total % 7})
+
+    def predict_5y(self):
+        if len(self.history) < 2:
             return '小单'
-        recent = history[-10:]
-        groups = [d.group.value for d in recent]
-        totals = [d.sum for d in recent]
-        all_g = ['小单', '小双', '大单', '大双']
-        counts = Counter(groups)
-        scores = {g: 0 for g in all_g}
-        for g in all_g:
-            scores[g] += (10 - counts.get(g, 0)) * 3
-        if len(groups) >= 2:
-            streak = 1
-            for i in range(len(groups)-2, -1, -1):
-                if groups[i] == groups[-1]:
-                    streak += 1
-                else:
-                    break
-            if streak >= 3:
-                scores[groups[-1]] -= streak * 15
-        return min(scores, key=scores.get)
-    
-    def _beitian(self, history: List[Draw]) -> Optional[str]:
-        if len(history) < 3:
-            return None
-        recent = history[-5:]
-        groups = [d.group.value for d in recent]
-        counts = Counter(groups)
-        all_g = ['小单', '小双', '大单', '大双']
-        for g in all_g:
-            if g not in counts:
-                return g
-        return min(counts, key=counts.get)
+        latest = self.history[-1]
+        yu5 = latest['yu5']
+        cn = latest['nums']
+        refs = [d for d in self.history[:-1] if d['yu5'] == yu5][-4:]
+        if not refs:
+            return self.yu5_kill.get(yu5, '小单')
+        kills = []
+        for ref in refs:
+            rule = self.yu5_rules.get(yu5, 'ge')
+            nn = cn.copy()
+            if rule == 'bai':
+                nn[0] = (cn[0] + ref['nums'][0]) % 10
+            elif rule == 'shi':
+                nn[1] = (cn[1] + ref['nums'][1]) % 10
+            elif rule == 'ge':
+                nn[2] = (cn[2] + ref['nums'][2]) % 10
+            elif rule == 'bai_shi':
+                n = (cn[0] + cn[1] + ref['nums'][0] + ref['nums'][1]) % 10
+                nn[0] = n
+                nn[1] = n
+            kills.append(self.yu5_kill.get(sum(nn) % 5, '小单'))
+        return Counter(kills).most_common(1)[0][0]
 
-predictor = Predictor()
+    def predict_7y(self):
+        if len(self.history) < 2:
+            return '小单'
+        latest = self.history[-1]
+        yu7 = latest['yu7']
+        cn = latest['nums']
+        refs = [d for d in self.history[:-1] if d['yu7'] == yu7][-4:]
+        if not refs:
+            return self.yu7_kill.get(yu7, '小单')
+        kills = []
+        for ref in refs:
+            rule = self.yu7_rules.get(yu7, 'ge')
+            nn = cn.copy()
+            if rule == 'bai':
+                nn[0] = (cn[0] + ref['nums'][0]) % 10
+            elif rule == 'shi':
+                nn[1] = (cn[1] + ref['nums'][1]) % 10
+            elif rule == 'ge':
+                nn[2] = (cn[2] + ref['nums'][2]) % 10
+            elif rule == 'bai_shi':
+                n = (cn[0] + cn[1] + ref['nums'][0] + ref['nums'][1]) % 10
+                nn[0] = n
+                nn[1] = n
+            kills.append(self.yu7_kill.get(sum(nn) % 7, '小单'))
+        return Counter(kills).most_common(1)[0][0]
+
+    def predict(self):
+        k5 = self.predict_5y()
+        k7 = self.predict_7y()
+        return k5 if k5 == k7 else k5
+
+
+def predict_stats(history):
+    if len(history) < 5:
+        return '小单'
+    combos = ['小单', '小双', '大单', '大双']
+    groups = []
+    totals = []
+    for h in history[-10:]:
+        if isinstance(h, Draw):
+            groups.append(h.group.value)
+            totals.append(h.sum)
+        elif isinstance(h, dict):
+            groups.append(h.get('combo', '小单'))
+            totals.append(h.get('sum', 0))
+    if not groups:
+        return '小单'
+    
+    scores = {g: 0 for g in combos}
+    streak = 1
+    for i in range(len(groups)-2, -1, -1):
+        if groups[i] == groups[-1]:
+            streak += 1
+        else:
+            break
+    if streak >= 3:
+        scores[groups[-1]] -= streak * 15
+    cnt = Counter(groups)
+    for g in combos:
+        scores[g] += (10 - cnt.get(g, 0)) * 3
+    for g in combos:
+        miss = 0
+        for i in range(len(groups)-1, -1, -1):
+            if groups[i] == g:
+                break
+            miss += 1
+        scores[g] += miss * 2
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)[-1][0]
+
+
+def predict_kill(history, algo):
+    if not history:
+        return '小单'
+    
+    if algo in ['5y', '7y', 'hybrid']:
+        bt = BeitianPredictor()
+        bt.add_data(history)
+        if algo == '5y':
+            return bt.predict_5y()
+        elif algo == '7y':
+            return bt.predict_7y()
+        else:
+            return bt.predict()
+    elif algo == 'stats':
+        return predict_stats(history)
+    elif algo == 'all':
+        # 融合：多个算法投票
+        bt = BeitianPredictor()
+        bt.add_data(history)
+        k5 = bt.predict_5y()
+        k7 = bt.predict_7y()
+        ks = predict_stats(history)
+        votes = [k5, k7, ks]
+        return Counter(votes).most_common(1)[0][0]
+    return '小单'
 
 # ============================================================
 # API 客户端
 # ============================================================
 
 class APIClient:
-    async def fetch(self) -> Optional[Draw]:
-        draw = await self._fetch_primary()
-        if draw:
-            return draw
-        return await self._fetch_backup()
-    
-    async def _fetch_primary(self) -> Optional[Draw]:
+    async def fetch(self, nbr=100) -> List[Draw]:
+        """获取历史开奖数据"""
         try:
-            loop = asyncio.get_event_loop()
-            resp = await loop.run_in_executor(None, lambda: requests.get("https://pc28.help/api/kj.json", timeout=10))
-            if resp.status_code == 200:
-                data = resp.json()
-                items = data.get('data', [])
-                if items:
-                    item = items[0]
-                    period = item.get('nbr')
-                    num_str = item.get('number')
-                    if period and num_str:
-                        digits = [int(d) for d in re.findall(r'\d', str(num_str)) if d.isdigit()]
-                        if len(digits) >= 3:
-                            d = Draw(str(period), digits[0], digits[1], digits[2])
-                            logger.info(f"API开奖: {d.period} -> {d.nums}={d.sum}")
-                            return d
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"https://pc28.help/api/kj.json?nbr={nbr}", timeout=15) as resp:
+                    data = await resp.json()
+                    if data.get('message') == 'success':
+                        items = data.get('data', [])
+                        history = []
+                        for item in items:
+                            period = item.get('nbr', '')
+                            num_str = item.get('number') or item.get('num', '')
+                            if not num_str or '+' not in num_str:
+                                continue
+                            parts = num_str.split('+')
+                            if len(parts) != 3:
+                                continue
+                            try:
+                                digits = [int(x) for x in parts]
+                            except ValueError:
+                                continue
+                            draw = Draw(period, digits[0], digits[1], digits[2])
+                            history.append(draw)
+                        history.sort(key=lambda x: x.period, reverse=True)
+                        return history
         except Exception as e:
-            logger.warning(f"主API失败: {e}")
-        return None
-    
-    async def _fetch_backup(self) -> Optional[Draw]:
-        try:
-            loop = asyncio.get_event_loop()
-            resp = await loop.run_in_executor(None, lambda: requests.get(
-                "https://api.api68.com/pks/getLotteryInfo.do?date=&lotCode=10026", timeout=10
-            ))
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get('result') and data['result']['data']:
-                    last = data['result']['data'][0]
-                    code = last.get('preDrawCode')
-                    if code:
-                        nums = code.split(',')
-                        if len(nums) >= 3:
-                            d = Draw(str(last['preDrawIssue']), int(nums[0]), int(nums[1]), int(nums[2]))
-                            logger.info(f"备用API开奖: {d.period} -> {d.nums}={d.sum}")
-                            return d
-        except Exception as e:
-            logger.warning(f"备用API失败: {e}")
-        return None
+            logger.warning(f"API获取失败: {e}")
+        return []
     
     def next_period(self, period: str) -> str:
         m = re.search(r'(\d+)$', period)
@@ -563,43 +615,53 @@ class APIClient:
         return period + '+1'
 
 # ============================================================
-# 登录服务
+# 登录服务 - 从自投.py移植
 # ============================================================
 
 class LoginService:
-    async def start(self, phone: str) -> Tuple[bool, str, Optional[TelegramClient]]:
-        path = config.get_session_path(phone)
+    async def login(self, phone: str) -> Tuple[bool, str, Optional[TelegramClient]]:
+        """登录 - 使用自投.py的逻辑"""
+        session_path = config.get_session_path(phone)
+        
         try:
-            client = TelegramClient(path, config.API_ID, config.API_HASH, connection_retries=5, retry_delay=2, timeout=30)
+            client = TelegramClient(session_path, config.API_ID, config.API_HASH)
             await client.connect()
+            
+            # 检查是否已授权
+            if await client.is_user_authorized():
+                me = await client.get_me()
+                return True, f"已登录: {me.first_name}", client
+            
+            # 发送验证码
             await client.send_code_request(phone)
             return True, "验证码已发送", client
-        except errors.FloodWaitError as e:
+            
+        except FloodWaitError as e:
             return False, f"请等待 {e.seconds} 秒", None
         except Exception as e:
+            logger.error(f"登录失败: {e}")
             return False, f"连接失败: {str(e)[:50]}", None
     
-    async def complete(self, client: TelegramClient, phone: str, code: str, password: str = None) -> Tuple[bool, str]:
+    async def complete_login(self, client: TelegramClient, phone: str, code: str, password: str = None) -> Tuple[bool, str]:
+        """完成登录"""
         try:
-            await client.sign_in(phone, code)
-            return True, "登录成功"
-        except errors.SessionPasswordNeededError:
+            await client.sign_in(phone=phone, code=code)
+            me = await client.get_me()
+            return True, f"登录成功: {me.first_name}"
+        except SessionPasswordNeededError:
             if password:
                 try:
                     await client.sign_in(password=password)
-                    return True, "登录成功"
+                    me = await client.get_me()
+                    return True, f"登录成功: {me.first_name}"
                 except Exception as e:
                     return False, f"密码错误: {e}"
             return False, "需要两步验证密码"
-        except errors.PhoneCodeInvalidError:
-            return False, "验证码错误"
-        except errors.PhoneCodeExpiredError:
-            return False, "验证码已过期"
         except Exception as e:
             return False, str(e)
 
 # ============================================================
-# 主机器人 - 简约版
+# 主机器人
 # ============================================================
 
 class XiaoHeShenBot:
@@ -656,9 +718,9 @@ class XiaoHeShenBot:
     
     def algo_keyboard(self):
         return ReplyKeyboardMarkup([
-            ["CIT杀组", "悲天悯人5Y"],
-            ["悲天悯人7Y", "悲天悯人混合"],
-            ["返回主菜单"]
+            ["悲天悯人5Y", "悲天悯人7Y"],
+            ["悲天悯人混合", "统计规律"],
+            ["全部融合", "返回主菜单"]
         ], resize_keyboard=True)
     
     # ---- 辅助 ----
@@ -697,17 +759,21 @@ class XiaoHeShenBot:
     
     def welcome_text(self) -> str:
         return (
-            "小鶴神自动投注 v3.0\n"
+            "小鶴神 · 自动投注 v3.0\n"
             "--------------------\n"
             "加拿大28 智能预测\n"
-            "CIT / 悲天悯人 算法\n"
-            "实时余额追踪"
+            "悲天悯人 / 统计融合\n"
+            "实时自动下注"
         )
     
     def menu_text(self, state: UserState) -> str:
         status = "运行中" if state.betting else "已停止"
         trigger = "开" if state.trigger_enabled else "关"
-        algo_names = {'cit': 'CIT', 'beitian_5y': '悲天5Y', 'beitian_7y': '悲天7Y', 'beitian_hybrid': '悲天混合'}
+        algo_names = {
+            '5y': '悲天5Y', '7y': '悲天7Y',
+            'hybrid': '悲天混合', 'stats': '统计规律',
+            'all': '全部融合'
+        }
         algo = algo_names.get(state.algorithm, '未知')
         
         groups = "\n".join([f"  {gid} x{state.multipliers.get(gid, 1.0):.2f}" for gid in state.groups]) if state.groups else "  无"
@@ -811,6 +877,7 @@ class XiaoHeShenBot:
             await state.client.disconnect()
             state.client = None
             state.phone = None
+            state.client_phone = None
             state.name = "未登录"
             state.tg_uid = None
             state.mark()
@@ -1103,10 +1170,10 @@ class XiaoHeShenBot:
     async def cmd_algorithm(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         state = await self.get_state(update.effective_chat.id)
         if not context.args:
-            await self.send(update, f"当前: {state.algorithm}\n可用: cit, beitian_5y, beitian_7y, beitian_hybrid")
+            await self.send(update, f"当前: {state.algorithm}\n可用: 5y, 7y, hybrid, stats, all")
             return
         algo = context.args[0].lower()
-        valid = ['cit', 'beitian_5y', 'beitian_7y', 'beitian_hybrid']
+        valid = ['5y', '7y', 'hybrid', 'stats', 'all']
         if algo not in valid:
             await self.send(update, f"无效. 可用: {', '.join(valid)}")
             return
@@ -1275,10 +1342,11 @@ class XiaoHeShenBot:
             await self.send(update, "选择算法:", self.algo_keyboard())
             return
         algo_map = {
-            "CIT杀组": "cit",
-            "悲天悯人5Y": "beitian_5y",
-            "悲天悯人7Y": "beitian_7y",
-            "悲天悯人混合": "beitian_hybrid",
+            "悲天悯人5Y": "5y",
+            "悲天悯人7Y": "7y",
+            "悲天悯人混合": "hybrid",
+            "统计规律": "stats",
+            "全部融合": "all",
         }
         if text in algo_map:
             context.args = [algo_map[text]]
@@ -1300,7 +1368,21 @@ class XiaoHeShenBot:
             state.pending_login['step'] = 'code'
             state.mark()
             await state.save()
-            await self.send(update, "请输入验证码:")
+            
+            # 发送验证码
+            success, msg, client = await self.login.login(text)
+            if not success:
+                await self.send(update, f"错误: {msg}")
+                state.pending_login = None
+                state.mark()
+                await state.save()
+                return
+            
+            # 保存客户端
+            state.pending_login['client'] = client
+            state.mark()
+            await state.save()
+            await self.send(update, f"{msg}\n请输入验证码:")
             return
         
         if state.pending_login['step'] == 'code':
@@ -1309,31 +1391,79 @@ class XiaoHeShenBot:
                 await self.send(update, "验证码必须为数字")
                 return
             
-            phone = state.pending_login['phone']
-            success, msg, client = await self.login.start(phone)
-            if not success:
-                await self.send(update, f"错误: {msg}")
+            client = state.pending_login.get('client')
+            if not client:
+                await self.send(update, "错误: 会话失效，请重新登录")
                 state.pending_login = None
                 state.mark()
                 await state.save()
                 return
             
-            success, msg = await self.login.complete(client, phone, code)
+            phone = state.pending_login['phone']
+            success, msg = await self.login.complete_login(client, phone, code)
+            
             if success:
                 if state.client:
                     await state.client.disconnect()
                 state.client = client
                 state.phone = phone
+                state.client_phone = phone
+                
                 try:
                     me = await client.get_me()
                     state.name = me.first_name or phone
                     state.tg_uid = me.id
                 except:
                     state.name = phone
+                
                 state.pending_login = None
                 state.mark()
                 await state.save()
-                await self.send(update, f"登录成功: {state.name}", self.main_keyboard())
+                await self.send(update, f"✅ {msg}", self.main_keyboard())
+                await self.send(update, self.menu_text(state), self.main_keyboard())
+            else:
+                if "需要两步验证密码" in msg:
+                    state.pending_login['step'] = 'password'
+                    state.mark()
+                    await state.save()
+                    await self.send(update, "🔒 请输入两步验证密码:")
+                else:
+                    await self.send(update, f"错误: {msg}")
+                    state.pending_login = None
+                    state.mark()
+                    await state.save()
+            return
+        
+        if state.pending_login['step'] == 'password':
+            client = state.pending_login.get('client')
+            if not client:
+                await self.send(update, "错误: 请重新登录")
+                state.pending_login = None
+                state.mark()
+                await state.save()
+                return
+            
+            phone = state.pending_login['phone']
+            success, msg = await self.login.complete_login(client, phone, '', text)
+            
+            if success:
+                if state.client:
+                    await state.client.disconnect()
+                state.client = client
+                state.phone = phone
+                state.client_phone = phone
+                
+                try:
+                    me = await client.get_me()
+                    state.name = me.first_name or phone
+                    state.tg_uid = me.id
+                except:
+                    state.name = phone
+                
+                state.pending_login = None
+                state.mark()
+                await state.save()
+                await self.send(update, f"✅ {msg}", self.main_keyboard())
                 await self.send(update, self.menu_text(state), self.main_keyboard())
             else:
                 await self.send(update, f"错误: {msg}")
@@ -1468,29 +1598,33 @@ class XiaoHeShenBot:
         logger.info("主循环启动")
         while self._running:
             try:
-                draw = await self.api.fetch()
-                if not draw:
+                history = await self.api.fetch()
+                if not history:
                     await asyncio.sleep(30)
                     continue
-                if self._global_period == draw.period:
+                
+                current = history[0]
+                if self._global_period == current.period:
                     await asyncio.sleep(5)
                     continue
-                self._global_period = draw.period
-                logger.info(f"新期号: {draw.period} {draw.nums}={draw.sum}")
                 
+                self._global_period = current.period
+                logger.info(f"新期号: {current.period} {current.nums}={current.sum}")
+                
+                # 获取所有活跃用户
                 states = []
                 for uid in list(self.store._cache.keys()):
                     state = await self.store.get(uid)
-                    if state.client:
+                    if state.client and state.betting:
                         states.append((uid, state))
                 
                 # 结算
                 for uid, state in states:
-                    if state.current_bet and state.current_bet.period == draw.period:
+                    if state.current_bet and state.current_bet.period == current.period:
                         try:
-                            profit = await state.settle(draw)
+                            profit = await state.settle(current)
                             if profit != 0:
-                                logger.info(f"[{state.name}] 结算 {draw.period}: {profit:+.3f}")
+                                logger.info(f"[{state.name}] 结算 {current.period}: {profit:+.3f}")
                         except Exception as e:
                             logger.error(f"[{state.name}] 结算失败: {e}")
                 
@@ -1499,33 +1633,33 @@ class XiaoHeShenBot:
                 # 下注
                 for uid, state in states:
                     try:
-                        if not state.betting or not state.client or not state.groups:
+                        if not state.groups:
                             continue
-                        await state.update_balance()
-                        kill = predictor.predict(state.history, state.algorithm)
-                        if kill:
-                            try:
-                                kill_g = next(g for g in Group if g.value == kill)
-                                bet_groups = [g for g in Group if g != kill_g]
-                            except StopIteration:
-                                bet_groups = list(Group)
-                        else:
-                            bet_groups = list(Group)
-                        if len(bet_groups) == 4:
-                            continue
-                        next_period = self.api.next_period(draw.period)
+                        
+                        # 预测杀组
+                        kill = predict_kill(history, state.algorithm)
+                        
+                        # 确定下注组
+                        bet_groups = [g for g in Group if g.value != kill]
+                        
+                        next_period = self.api.next_period(current.period)
+                        
+                        # 13/14触发
                         triggered = False
-                        if state.trigger_enabled and draw.sum in (13, 14):
+                        if state.trigger_enabled and current.sum in (13, 14):
                             state.recommend_amount = int(state.recommend_amount * state.trigger_multiplier)
                             triggered = True
                             logger.info(f"[{state.name}] 13/14触发: {state.recommend_amount}")
+                        
                         await asyncio.sleep(state.bet_delay)
                         success = await state.place_bet(bet_groups, next_period, triggered)
+                        
                         if success:
                             logger.info(f"[{state.name}] 下注 {next_period}: 杀组={kill}")
                     except Exception as e:
                         logger.error(f"[{state.name}] 下注失败: {e}")
                 
+                # 汇总
                 total_bal = sum(s.balance for s in self.store._cache.values() if s.client)
                 total_profit = sum(s.daily_profit for s in self.store._cache.values() if s.client)
                 logger.info(f"汇总: 余额={total_bal:.3f} 盈亏={total_profit:+.3f}")
@@ -1538,6 +1672,14 @@ class XiaoHeShenBot:
     # ---- 启动 ----
     
     async def start(self):
+        try:
+            import aiohttp
+        except ImportError:
+            logger.warning("缺少 aiohttp，正在安装...")
+            import subprocess
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "aiohttp"])
+            logger.info("aiohttp 已安装")
+        
         try:
             requests.get(f"https://api.telegram.org/bot{config.BOT_TOKEN}/deleteWebhook")
             await asyncio.sleep(0.5)
@@ -1589,13 +1731,14 @@ class XiaoHeShenBot:
         self._running = True
         asyncio.create_task(self.run_loop())
         
-        logger.info("机器人已启动")
+        logger.info("小鶴神机器人已启动")
         await asyncio.Event().wait()
     
     def stop(self):
         self._running = False
         if self.app:
             self.app.stop()
+
 
 # ============================================================
 # 入口
