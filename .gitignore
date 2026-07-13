@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# 数据目录
+user_data/
+telegram_sessions/
+*.session
+*.session-journal
+logs/
+
+# 环境变量
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 测试
+.pytest_cache/
+.coverage
